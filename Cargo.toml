@@ -1,0 +1,34 @@
+[package]
+name = "unbound-perf"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+h3 = { git = "https://github.com/yaroslavros/h3", branch = "unframed-connect" }
+h3-quinn = { git = "https://github.com/yaroslavros/h3", branch = "unframed-connect" }
+http = "1"
+quinn = { version = "0.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls",
+    "ring",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "logging",
+] }
+rustls-pemfile = "2"
+s2n-quic = { git = "https://github.com/yaroslavros/s2n-quic", branch = "unframed-connect" }
+s2n-quic-h3 = { git = "https://github.com/yaroslavros/s2n-quic", branch = "unframed-connect" }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+
+# s2n-quic-h3 depends on the published h3, which has no unbound data support yet.
+[patch.crates-io]
+h3 = { git = "https://github.com/yaroslavros/h3", branch = "unframed-connect" }
+
+[profile.release]
+debug = true
