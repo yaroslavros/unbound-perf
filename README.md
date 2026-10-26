@@ -46,18 +46,20 @@ Reading the table:
   and produced an 8% "regression" that did not exist.
 - **All three modes share one connection, interleaved round-robin.** The mode travels in a
   request header, so each round runs framed, unbound and handoff back to back. This matters:
-  throughput on this machine drifts over tens of seconds, and measuring one mode after another
-  would charge that drift to whichever ran last.
+  throughput can drift over tens of seconds, and measuring one mode after another would charge
+  that drift to whichever ran last.
 - **Warmup rounds are discarded.** The first two or three transfers on a fresh connection are
-  measurably slower — s2n-quic ramps from ~71 to ~86 MiB/s and then holds steady — so
-  `--warmup 3` runs before the clock counts.
+  measurably slower — throughput ramps and then holds steady — so `--warmup 3` runs before the
+  clock counts.
 - **One-way, client to server**, which is what a tunnel upload looks like. Each side switches
   only the direction it uses — the client sends `UNBOUND_DATA`, the server only receives it — so
   `handoff` hands over a single half on each end (`into_unbound_send`, `into_unbound_recv`).
-- **The same API shape in every mode.** The `handoff` mode writes owned `Bytes` chunks
-  (`quinn::SendStream::write_chunk`, `s2n_quic::stream::SendStream::send`) and reads owned chunks
-  (`read_chunk`, `receive`), which is exactly what the h3 backends do internally. No mode pays
-  for a copy another one avoids.
+- **The `handoff` mode uses the API an application would reach for**: owned `Bytes` per write
+  (`quinn::SendStream::write_chunk`, `s2n_quic::stream::SendStream::send`) and owned chunks per
+  read (`read_chunk`, `receive`). h3's own send path cannot do that — it passes the payload to the
+  transport as a borrowed slice, which costs a copy — and that difference is a real part of what
+  the handoff saves, not a handicap imposed by this harness. Equalising it by making `handoff`
+  copy too would measure something nobody writes. See finding 2 below.
 - **Generous flow-control windows** on both implementations (32 MiB per stream), so a run is
   never window-bound.
 - The measurement loop itself lives in `src/tunnel.rs` and is generic over `h3::quic::Connection`,
@@ -71,49 +73,74 @@ a performance one, and mixing stacks would make the numbers harder to attribute.
 
 ## What the numbers look like
 
-Measured on an Apple M4 Max (macOS 27.0), 128 MiB per run, median of 5 after 3 warmup rounds.
-Your machine will differ, but the shape should not:
+Measured on an i9-13900K running Linux, 128 MiB per run, median of 10 after 3 warmup rounds
+(`--iters 10`):
 
 ```
-quinn — 128 MiB per run, median of 5 (3 warmup)
+quinn — 128 MiB per run, median of 10 (3 warmup)
 
      chunk          framed         unbound         handoff   unbound Δ   handoff Δ  DATA headers   noise
-      64 B       6.9 MiB/s      19.4 MiB/s      19.0 MiB/s     +178.7%     +173.8%         4.69%   ±6.2%
-     512 B     111.2 MiB/s     181.0 MiB/s     185.0 MiB/s      +62.8%      +66.3%         0.59%   ±4.7%
-     4 KiB     222.2 MiB/s     232.4 MiB/s     239.1 MiB/s       +4.6%       +7.6%         0.07%   ±5.0%
-    16 KiB     235.2 MiB/s     238.5 MiB/s     243.2 MiB/s       +1.4%       +3.4%         0.03%   ±4.8%
-    64 KiB     240.1 MiB/s     240.5 MiB/s     244.6 MiB/s       +0.2%       +1.9%         0.01%   ±9.8%
+      64 B       8.6 MiB/s      30.7 MiB/s      32.8 MiB/s     +257.1%     +281.7%         4.69%  ±21.0%
+     512 B     207.5 MiB/s     501.9 MiB/s     535.1 MiB/s     +141.9%     +157.9%         0.59%  ±16.3%
+     4 KiB     822.8 MiB/s     923.4 MiB/s    1044.3 MiB/s      +12.2%      +26.9%         0.07%   ±1.3%
+    16 KiB     952.6 MiB/s     979.4 MiB/s    1102.2 MiB/s       +2.8%      +15.7%         0.03%   ±1.3%
+    64 KiB     980.2 MiB/s     987.8 MiB/s    1113.8 MiB/s       +0.8%      +13.6%         0.01%   ±1.8%
 
-s2n-quic — 128 MiB per run, median of 5 (3 warmup)
+s2n-quic — 128 MiB per run, median of 10 (3 warmup)
 
      chunk          framed         unbound         handoff   unbound Δ   handoff Δ  DATA headers   noise
-      64 B      43.6 MiB/s      70.4 MiB/s      73.7 MiB/s      +61.3%      +68.9%         4.69%  ±24.8%
-     512 B     123.9 MiB/s     139.3 MiB/s     143.4 MiB/s      +12.4%      +15.7%         0.59%   ±1.1%
-     4 KiB     148.7 MiB/s     151.9 MiB/s     153.3 MiB/s       +2.2%       +3.1%         0.07%   ±1.9%
-    16 KiB     153.0 MiB/s     154.3 MiB/s     154.4 MiB/s       +0.8%       +0.9%         0.03%   ±4.0%
-    64 KiB     153.9 MiB/s     154.1 MiB/s     154.9 MiB/s       +0.1%       +0.6%         0.01%   ±1.4%
+      64 B      93.5 MiB/s     235.6 MiB/s     296.0 MiB/s     +152.1%     +216.7%         4.69%   ±2.5%
+     512 B     494.5 MiB/s     756.6 MiB/s     857.3 MiB/s      +53.0%      +73.3%         0.59%   ±0.7%
+     4 KiB     979.8 MiB/s    1074.1 MiB/s    1130.4 MiB/s       +9.6%      +15.4%         0.07%   ±0.8%
+    16 KiB    1111.1 MiB/s    1147.5 MiB/s    1188.2 MiB/s       +3.3%       +6.9%         0.03%   ±1.1%
+    64 KiB    1156.0 MiB/s    1168.6 MiB/s    1205.6 MiB/s       +1.1%       +4.3%         0.01%   ±0.9%
 ```
 
-The gain falls away monotonically as chunks grow, in both implementations, and neither trend is
-about the bytes saved on the wire:
+Both implementations tell the same story, and the two columns of deltas answer two different
+questions.
 
-1. **Small chunks win big** — far more than the 4.69% of header bytes at 64 B can explain. The
-   reason is that a `DATA` frame is written as *two* pieces: h3 hands the frame header and the
-   payload to the transport separately, so a framed chunk costs two writes into the QUIC stream
-   where an unbound chunk costs one. At 64 B the per-write cost dominates everything else.
-2. **Large chunks are a wash.** At 16 KiB and above the framing is 0.03% of the bytes and the
-   per-write overhead is amortised, so all three modes sit at whatever the loopback path can
-   sustain. If a tunnel moves data in large chunks, unbound data buys little; if it relays small
-   writes — interactive sessions, telemetry, anything latency-shaped — it is a large win.
+**1. Dropping the framing is what wins on small writes.** At 64 B the gain is 257% (quinn) and
+152% (s2n-quic) — far more than the 4.69% of header bytes can explain. A `DATA` frame is written
+as *two* pieces: h3 hands the frame header and the payload to the transport separately, so a
+framed chunk costs two writes into the QUIC stream where an unbound chunk costs one. At 64 B the
+per-write cost dominates everything else. The gain then falls away as chunks grow and that cost
+is amortised: by 64 KiB, `unbound` is only +0.8% / +1.1% over `framed`.
 
-The gap between `unbound` and `handoff` is h3's own send/receive path, with framing already out
-of the picture. It is consistently small, so most of the win is the framing rather than h3's
-overhead — handing the stream back is worth it mainly for what it lets the application do next
-(`copy_bidirectional` straight onto the QUIC stream, backend-specific knobs, no h3 in the loop).
+**2. Handing the stream back keeps winning at every chunk size** — +13.6% (quinn) and +4.3%
+(s2n-quic) at 64 KiB, against ±1.8% / ±0.9% noise. That is not about framing, which is already
+gone in both modes being compared. It is a per-byte cost in h3's send path: h3 passes the payload
+to the transport as a *borrowed slice*, so the transport has to copy it, while the native API
+takes an owned `Bytes` and does not. In quinn-proto the two paths are visible side by side —
+`ByteSlice::pop_chunk` does `Bytes::from(self.data[..limit].to_owned())`, a full copy, whereas
+`BytesArray::pop_chunk` (reached via `write_chunk`) does `chunk.split_to(limit)`, a refcount
+split. s2n-quic-h3 copies in the same place, with a `TODO` pointing at
+[hyperium/h3#78](https://github.com/hyperium/h3/issues/78).
 
-Watch the `noise` column before reading anything into a small delta: the s2n-quic 64 B row above
-carries ±24.8%, all of it one outlier iteration, which is why the median rather than the best run
-is reported.
+So the handoff's advantage at large chunks is really the cost of an h3 API limitation, which a
+zero-copy send path in h3 would narrow. Until then, taking the stream back is worth a few percent
+of CPU on every byte, on top of whatever the framing costs.
+
+**3. Watch the `noise` column.** The small-chunk rows are the noisy ones (quinn at 64 B and 512 B
+still move ±16-21% even over 10 iterations), which is ironic given they carry the largest effects
+— the effects are so large that the noise does not threaten them. The rows where a few percent
+*is* the whole result, 4 KiB and up, are the stable ones at ±1-2%.
+
+### The platform matters more than you would think
+
+An earlier run of the same code on an Apple M4 Max (macOS 27.0) capped out near 240 MiB/s in
+*every* mode, and the handoff gain at 64 KiB shrank to +1.9% (quinn) and +0.6% (s2n-quic) — which
+reads as "no difference at large chunks". macOS gives neither library the UDP batching and
+segmentation offload they use on Linux, so the transport path there is expensive enough to hide
+h3's per-byte cost entirely: the bottleneck was never h3.
+
+That is worth keeping in mind when reading any result from this harness. It measures the protocol
+work per byte against whatever the local transport path costs; make the transport cheap, as Linux
+does, and h3's share of the work becomes visible. The Linux numbers above are the ones to use for
+a server deployment.
+
+Comparing the two tables against each other is not the point — the implementations have different
+defaults and the harness only equalises flow-control windows. Each table's delta columns are the
+result.
 
 ## Dependencies
 
