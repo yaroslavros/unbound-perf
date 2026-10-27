@@ -127,6 +127,7 @@ fn transport() -> Arc<quinn::TransportConfig> {
     Arc::new(transport)
 }
 
+#[cfg(feature = "unbound")]
 impl NativeHalves for h3_quinn::BidiStream<Bytes> {
     type NativeSender = quinn::SendStream;
     type NativeReceiver = quinn::RecvStream;
@@ -138,6 +139,21 @@ impl NativeHalves for h3_quinn::BidiStream<Bytes> {
 
     fn into_native_recv(recv: Self::RecvStream) -> Self::NativeReceiver {
         recv.into_quinn()
+    }
+}
+
+/// The upstream h3-quinn has no `into_quinn`, so the handoff mode is not available there.
+#[cfg(not(feature = "unbound"))]
+impl NativeHalves for h3_quinn::BidiStream<Bytes> {
+    type NativeSender = crate::tunnel::Unsupported;
+    type NativeReceiver = crate::tunnel::Unsupported;
+
+    fn into_native_send(_send: Self::SendStream) -> Self::NativeSender {
+        crate::tunnel::Unsupported
+    }
+
+    fn into_native_recv(_recv: Self::RecvStream) -> Self::NativeReceiver {
+        crate::tunnel::Unsupported
     }
 }
 

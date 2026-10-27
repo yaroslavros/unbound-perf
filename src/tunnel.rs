@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use bytes::{Buf, Bytes};
+#[cfg(feature = "unbound")]
 use h3::error::StreamError;
 use http::{Method, Request, Response, StatusCode};
 use tokio::sync::mpsc;
@@ -29,12 +30,17 @@ const MODE_HEADER: &str = "x-tunnel-mode";
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     /// Plain RFC 9114 CONNECT: every write is wrapped in a `DATA` frame.
+    ///
+    /// The only mode an unmodified h3 can do, which is why it is the one the upstream baseline
+    /// build measures.
     Framed,
     /// `UNBOUND_DATA` is sent, but the stream stays with h3: writes and reads still go through
     /// `send_data`/`recv_data`, just without frame headers.
+    #[cfg(feature = "unbound")]
     Unbound,
     /// `UNBOUND_DATA` is sent and the stream is handed back to the QUIC implementation, so h3 is
     /// out of the data path entirely and the payload moves with the native API.
+    #[cfg(feature = "unbound")]
     Handoff,
 }
 
@@ -42,7 +48,9 @@ impl Mode {
     pub fn label(self) -> &'static str {
         match self {
             Mode::Framed => "framed",
+            #[cfg(feature = "unbound")]
             Mode::Unbound => "unbound",
+            #[cfg(feature = "unbound")]
             Mode::Handoff => "handoff",
         }
     }
@@ -50,8 +58,15 @@ impl Mode {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "framed" => Ok(Mode::Framed),
+            #[cfg(feature = "unbound")]
             "unbound" => Ok(Mode::Unbound),
+            #[cfg(feature = "unbound")]
             "handoff" => Ok(Mode::Handoff),
+            #[cfg(not(feature = "unbound"))]
+            "unbound" | "handoff" => bail!(
+                "`{value}` needs the unbound data API; this binary is built against the \
+                 unmodified upstream libraries, which only have framed CONNECT"
+            ),
             other => bail!("unknown mode `{other}`, expected framed, unbound or handoff"),
         }
     }
@@ -85,6 +100,7 @@ impl RunConfig {
 /// Both implementations are given the same shape of API — one owned [`Bytes`] per write, one
 /// owned chunk per read — which is also what the h3 backends use internally. That keeps the
 /// framed and handoff numbers comparable: no mode pays for a copy the other avoids.
+#[cfg_attr(not(feature = "unbound"), allow(dead_code))]
 pub trait NativeHalves: h3::quic::BidiStream<Bytes> + Sized {
     type NativeSender: NativeSend;
     type NativeReceiver: NativeRecv;
@@ -93,13 +109,38 @@ pub trait NativeHalves: h3::quic::BidiStream<Bytes> + Sized {
     fn into_native_recv(recv: Self::RecvStream) -> Self::NativeReceiver;
 }
 
+/// Stands in for the native stream types in the upstream baseline build, where the handoff API
+/// does not exist. The modes that would use it cannot be selected there, so it is never built.
+#[cfg(not(feature = "unbound"))]
+pub struct Unsupported;
+
+#[cfg(not(feature = "unbound"))]
+impl NativeSend for Unsupported {
+    async fn send_chunk(&mut self, _chunk: Bytes) -> Result<()> {
+        unreachable!("the handoff mode needs the unbound data API")
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        unreachable!("the handoff mode needs the unbound data API")
+    }
+}
+
+#[cfg(not(feature = "unbound"))]
+impl NativeRecv for Unsupported {
+    async fn recv_chunk(&mut self) -> Result<Option<usize>> {
+        unreachable!("the handoff mode needs the unbound data API")
+    }
+}
+
 #[allow(async_fn_in_trait)]
+#[cfg_attr(not(feature = "unbound"), allow(dead_code))]
 pub trait NativeSend {
     async fn send_chunk(&mut self, chunk: Bytes) -> Result<()>;
     fn finish(&mut self) -> Result<()>;
 }
 
 #[allow(async_fn_in_trait)]
+#[cfg_attr(not(feature = "unbound"), allow(dead_code))]
 pub trait NativeRecv {
     /// Returns the size of the next chunk, or `None` at the end of the stream.
     async fn recv_chunk(&mut self) -> Result<Option<usize>>;
@@ -113,7 +154,9 @@ where
     C: h3::quic::Connection<Bytes>,
     C::BidiStream: NativeHalves,
 {
+    #[cfg_attr(not(feature = "unbound"), allow(unused_mut))]
     let mut builder = h3::server::builder();
+    #[cfg(feature = "unbound")]
     builder.enable_unbound_data(true);
     let mut incoming: h3::server::Connection<C, Bytes> = builder.build(conn).await?;
 
@@ -135,13 +178,11 @@ where
         stream.send_response(Response::new(())).await?;
 
         let received = match mode {
-            Mode::Framed | Mode::Unbound => {
-                let mut total = 0;
-                while let Some(chunk) = stream.recv_data().await? {
-                    total += chunk.remaining() as u64;
-                }
-                total
-            }
+            // Unbound data is transparent to `recv_data`, so both of these drain the same way.
+            Mode::Framed => drain_through_h3(&mut stream).await?,
+            #[cfg(feature = "unbound")]
+            Mode::Unbound => drain_through_h3(&mut stream).await?,
+            #[cfg(feature = "unbound")]
             Mode::Handoff => {
                 // Only the receiving direction is taken over. `_send` stays alive because
                 // dropping it would reset that direction under the peer.
@@ -165,6 +206,19 @@ where
     Ok(())
 }
 
+/// Counts the bytes h3 delivers, whether they arrived framed or unbound.
+async fn drain_through_h3<S>(stream: &mut h3::server::RequestStream<S, Bytes>) -> Result<u64>
+where
+    S: h3::quic::RecvStream,
+{
+    let mut total = 0;
+    while let Some(chunk) = stream.recv_data().await? {
+        total += chunk.remaining() as u64;
+    }
+
+    Ok(total)
+}
+
 /// Runs `rounds` transfers of every mode on one connection, interleaved, and returns the timings
 /// grouped by mode.
 ///
@@ -182,7 +236,9 @@ where
     O: h3::quic::OpenStreams<Bytes, BidiStream = C::BidiStream>,
     C::BidiStream: NativeHalves,
 {
+    #[cfg_attr(not(feature = "unbound"), allow(unused_mut))]
     let mut builder = h3::client::builder();
+    #[cfg(feature = "unbound")]
     builder.enable_unbound_data(true);
     let (mut driver, send_request) = builder.build::<C, O, Bytes>(conn).await?;
 
@@ -254,11 +310,13 @@ where
             send_framed(&mut stream, payload, cfg).await?;
             stream.finish().await?;
         }
+        #[cfg(feature = "unbound")]
         Mode::Unbound => {
             switch_to_unbound(&mut stream).await?;
             send_framed(&mut stream, payload, cfg).await?;
             stream.finish().await?;
         }
+        #[cfg(feature = "unbound")]
         Mode::Handoff => {
             switch_to_unbound(&mut stream).await?;
 
@@ -295,6 +353,7 @@ where
 }
 
 /// Switches the sending side to unbound data, waiting out the peer's SETTINGS frame.
+#[cfg(feature = "unbound")]
 ///
 /// The control stream is unordered with respect to the request stream, so the client can be ready
 /// to switch before it knows whether the server accepts `UNBOUND_DATA`. Only the first run of a

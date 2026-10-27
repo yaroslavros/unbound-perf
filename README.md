@@ -9,6 +9,8 @@ measured separately for [quinn](https://github.com/quinn-rs/quinn) and
 cargo run --release                       # the whole sweep, both implementations
 cargo run --release -- --help             # all the knobs
 cargo run --release -- --libs quinn --chunks 512 --total-mib 256
+
+./compare.sh --iters 10                   # upstream baseline first, then the forked build
 ```
 
 ## What it measures
@@ -70,6 +72,46 @@ from a ramp or an outlier.
 
 Cross-implementation runs are deliberately not supported; interop is a correctness question, not
 a performance one, and mixing stacks would make the numbers harder to attribute.
+
+## Checking the fork against upstream
+
+The forked h3 is in the path for *all three* modes, so a regression in it would quietly shrink
+the deltas — or invent them. `baseline/` is the control: a second binary that compiles the same
+harness source against **unmodified** h3, h3-quinn, s2n-quic and s2n-quic-h3, pinned to the
+commits each fork branched from:
+
+```
+hyperium/h3    43745ad  webtransport: change accept_bi() to return a resolving stream (#356)
+aws/s2n-quic   d20f8fad fix(dc): reduce PSK handshake future size (#3362)
+```
+
+It only knows the framed mode — the `unbound` cargo feature is off, so the unbound data API is
+never referenced and the other two modes are rejected with a message saying why. Compare its
+`framed` column against `framed` from the main binary:
+
+```
+./compare.sh --iters 10
+```
+
+Two details that make this a real control rather than a gesture:
+
+- **The modules are shared, not copied.** `baseline/src/main.rs` pulls in `../../src/*.rs` with
+  `#[path]`, so the timing loop, warmup, interleaving, flow-control limits and payload handling
+  are the same code. Only the dependency graph differs.
+- **One h3 in the graph.** `s2n-quic-h3` asks for `h3` from crates.io, so `[patch.crates-io]`
+  sends it to the same pinned upstream commit. Worth confirming after any dependency change:
+
+  ```
+  cd baseline && cargo tree -i h3
+  h3 v0.0.8 (https://github.com/hyperium/h3?rev=43745ad…)
+  ├── h3-quinn v0.0.10 (https://github.com/hyperium/h3?rev=43745ad…)
+  └── s2n-quic-h3 v0.1.0 (https://github.com/aws/s2n-quic?rev=d20f8fad…)
+  ```
+
+On the macOS machine used while writing this, framed throughput came out the same either way —
++3.0% / −1.2% (quinn, 512 B / 16 KiB) and +2.1% / +1.2% (s2n-quic), all inside the ±1–10% noise
+of those rows. Worth repeating on the machine you publish from, since that is the platform whose
+numbers people will read.
 
 ## What the numbers look like
 
@@ -160,6 +202,9 @@ at paths:
 [patch.crates-io]
 h3 = { path = "../h3/h3" }
 ```
+
+`baseline/Cargo.toml` pins the same four crates to their pre-fork upstream commits; see
+[Checking the fork against upstream](#checking-the-fork-against-upstream).
 
 `certs/` holds the self-signed test certificate vendored from `s2n-quic-core`, which both
 s2n-tls and rustls accept. It is a demo certificate — never use it for anything else.

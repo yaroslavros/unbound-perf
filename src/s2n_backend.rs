@@ -104,6 +104,7 @@ fn limits() -> Result<Limits> {
         .with_max_idle_timeout(Duration::from_secs(30))?)
 }
 
+#[cfg(feature = "unbound")]
 impl NativeHalves for s2n_quic_h3::BidiStream<Bytes> {
     type NativeSender = s2n_quic::stream::SendStream;
     type NativeReceiver = s2n_quic::stream::ReceiveStream;
@@ -115,6 +116,21 @@ impl NativeHalves for s2n_quic_h3::BidiStream<Bytes> {
 
     fn into_native_recv(recv: Self::RecvStream) -> Self::NativeReceiver {
         recv.into_s2n_quic()
+    }
+}
+
+/// The upstream s2n-quic-h3 has no `into_s2n_quic`, so the handoff mode is not available there.
+#[cfg(not(feature = "unbound"))]
+impl NativeHalves for s2n_quic_h3::BidiStream<Bytes> {
+    type NativeSender = crate::tunnel::Unsupported;
+    type NativeReceiver = crate::tunnel::Unsupported;
+
+    fn into_native_send(_send: Self::SendStream) -> Self::NativeSender {
+        crate::tunnel::Unsupported
+    }
+
+    fn into_native_recv(_recv: Self::RecvStream) -> Self::NativeReceiver {
+        crate::tunnel::Unsupported
     }
 }
 

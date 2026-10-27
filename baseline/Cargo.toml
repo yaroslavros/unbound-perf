@@ -1,0 +1,49 @@
+[package]
+name = "unbound-perf-baseline"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Its own workspace: a `[patch]` section is only honoured in a workspace root.
+[workspace]
+
+[features]
+# Declared so the shared source can check it, and deliberately never enabled: these libraries do
+# not have the unbound data API, so only the framed mode is built here.
+unbound = []
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+http = "1"
+quinn = { version = "0.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls",
+    "ring",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "logging",
+] }
+rustls-pemfile = "2"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+
+# Upstream, pinned to the commit each fork branched from, so the only difference against the
+# forked build is the unbound data work itself.
+#
+#   hyperium/h3    43745ad  webtransport: change accept_bi() to return a resolving stream (#356)
+#   aws/s2n-quic   d20f8fad fix(dc): reduce PSK handshake future size (#3362)
+h3 = { git = "https://github.com/hyperium/h3", rev = "43745ad87e95b0c035ac9c547aad467303213425" }
+h3-quinn = { git = "https://github.com/hyperium/h3", rev = "43745ad87e95b0c035ac9c547aad467303213425" }
+s2n-quic = { git = "https://github.com/aws/s2n-quic", rev = "d20f8fad59aab4815ad901c06b5730608ff7dd24" }
+s2n-quic-h3 = { git = "https://github.com/aws/s2n-quic", rev = "d20f8fad59aab4815ad901c06b5730608ff7dd24" }
+
+# s2n-quic-h3 asks for h3 from crates.io; send it to the same upstream commit rather than the
+# published release, so both backends measure one h3.
+[patch.crates-io]
+h3 = { git = "https://github.com/hyperium/h3", rev = "43745ad87e95b0c035ac9c547aad467303213425" }
+
+[profile.release]
+debug = true

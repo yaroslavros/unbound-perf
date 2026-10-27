@@ -1,1 +1,3 @@
 /target
+# the baseline is its own workspace, so it has its own target directory
+/baseline/target

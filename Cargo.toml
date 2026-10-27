@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = ["unbound"]
+# Off in `baseline/`, which builds the same source against the unmodified upstream libraries.
+unbound = []
+
 [dependencies]
 anyhow = "1"
 bytes = "1"
@@ -32,3 +37,7 @@ h3 = { git = "https://github.com/yaroslavros/h3", branch = "unframed-connect" }
 
 [profile.release]
 debug = true
+
+[workspace]
+# `baseline/` is its own workspace: a `[patch]` section only takes effect in a workspace root.
+exclude = ["baseline"]
