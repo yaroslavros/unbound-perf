@@ -2,11 +2,13 @@
 
 Throughput of an HTTP/3 `CONNECT` tunnel with and without
 [unbound data](https://datatracker.ietf.org/doc/draft-rosomakho-httpbis-h3-unbound-data/),
-measured separately for [quinn](https://github.com/quinn-rs/quinn) and
-[s2n-quic](https://github.com/aws/s2n-quic).
+measured separately for [quinn](https://github.com/quinn-rs/quinn),
+[s2n-quic](https://github.com/aws/s2n-quic) and
+[quiche](https://github.com/cloudflare/quiche) (through
+[tokio-quiche](https://github.com/cloudflare/quiche/tree/master/tokio-quiche)).
 
 ```
-cargo run --release                       # the whole sweep, both implementations
+cargo run --release                       # the whole sweep, all three implementations
 cargo run --release -- --help             # all the knobs
 cargo run --release -- --libs quinn --chunks 512 --total-mib 256
 
@@ -20,15 +22,26 @@ it one chunk at a time. Each combination is measured three ways:
 
 | mode | on the wire | in the data path |
 | --- | --- | --- |
-| `framed` | every chunk wrapped in a `DATA` frame | h3 |
-| `unbound` | `UNBOUND_DATA`, then raw bytes | h3 |
+| `framed` | every chunk wrapped in a `DATA` frame | the HTTP/3 layer |
+| `unbound` | `UNBOUND_DATA`, then raw bytes | the HTTP/3 layer |
 | `handoff` | `UNBOUND_DATA`, then raw bytes | the QUIC implementation itself |
 
-The third mode is what `into_unbound()` is for: once both ends stop framing, h3 has nothing left
-to do on the stream, so it hands it back and the application talks to
-`quinn::SendStream`/`s2n_quic::stream::SendStream` directly. Comparing `framed` with `unbound`
-isolates what the framing costs; comparing `unbound` with `handoff` isolates what h3's own
+The third mode is the point of the handoff: once both ends stop framing, HTTP/3 has nothing left
+to do on the stream, so it gets out of the way. Comparing `framed` with `unbound` isolates what
+the framing costs; comparing `unbound` with `handoff` isolates what the HTTP/3 layer's own
 send/receive path costs on top.
+
+What "gets out of the way" means differs between the two architectures, and that is worth knowing
+before reading the `handoff Δ` column:
+
+- **h3 (quinn, s2n-quic)** gives the stream *back*. `into_unbound()` returns the backend's own
+  stream, and the application then talks to `quinn::SendStream`/`s2n_quic::stream::SendStream`
+  directly. The API changes, and so does the cost per byte — see finding 2 below.
+- **quiche (tokio-quiche)** cannot: its `H3Driver` owns the `quiche::Connection`, so no
+  application can hold a stream of its own. `OutboundFrame::UnboundData { take_over: true }`
+  instead tells the driver to move the bytes straight on the transport, skipping
+  `quiche::h3::Connection` entirely. The application keeps using the same channels, so here the
+  delta really is only the HTTP/3 layer's own bookkeeping.
 
 Reading the table:
 
@@ -62,10 +75,19 @@ Reading the table:
   transport as a borrowed slice, which costs a copy — and that difference is a real part of what
   the handoff saves, not a handicap imposed by this harness. Equalising it by making `handoff`
   copy too would measure something nobody writes. See finding 2 below.
-- **Generous flow-control windows** on both implementations (32 MiB per stream), so a run is
-  never window-bound.
-- The measurement loop itself lives in `src/tunnel.rs` and is generic over `h3::quic::Connection`,
-  so both libraries execute the same code.
+- **In quiche, no mode pays for a copy the mode it is compared against avoids.** All three go
+  through the same owned `Bytes` channel; framed and unbound reach the transport via
+  `send_body_zc`, handoff via `stream_send_zc`. The first version of the driver used plain
+  `stream_send` on the taken-over stream, which copies out of a borrowed slice, and that was
+  enough to make `handoff` measurably *slower* than `unbound` at large chunks. If that row ever
+  goes negative again, suspect the same thing.
+- **Generous flow-control windows** everywhere (32 MiB per stream), so a run is never
+  window-bound.
+- The measurement loop for quinn and s2n-quic lives in `src/tunnel.rs` and is generic over
+  `h3::quic::Connection`, so those two execute the same code. quiche's HTTP/3 is not generic over
+  a transport, so `src/quiche_backend.rs` has its own loop; it is deliberately the same shape —
+  one connection per series, modes interleaved round-robin, the clock running from the `CONNECT`
+  response to the far end's byte-count report.
 
 Use `--show-runs` to print every timed iteration; it is the quickest way to tell a real delta
 from a ramp or an outlier.
@@ -75,14 +97,15 @@ a performance one, and mixing stacks would make the numbers harder to attribute.
 
 ## Checking the fork against upstream
 
-The forked h3 is in the path for *all three* modes, so a regression in it would quietly shrink
-the deltas — or invent them. `baseline/` is the control: a second binary that compiles the same
-harness source against **unmodified** h3, h3-quinn, s2n-quic and s2n-quic-h3, pinned to the
-commits each fork branched from:
+The forked libraries are in the path for *all three* modes, so a regression in one would quietly
+shrink the deltas — or invent them. `baseline/` is the control: a second binary that compiles the
+same harness source against **unmodified** h3, h3-quinn, s2n-quic, s2n-quic-h3, quiche and
+tokio-quiche, pinned to the commits each fork branched from:
 
 ```
-hyperium/h3    43745ad  webtransport: change accept_bi() to return a resolving stream (#356)
-aws/s2n-quic   d20f8fad fix(dc): reduce PSK handshake future size (#3362)
+hyperium/h3        43745ad  webtransport: change accept_bi() to return a resolving stream (#356)
+aws/s2n-quic       d20f8fad fix(dc): reduce PSK handshake future size (#3362)
+cloudflare/quiche  4ebd2133 quiche: add outstanding sent packets limit (#2839)
 ```
 
 It only knows the framed mode — the `unbound` cargo feature is off, so the unbound data API is
@@ -109,9 +132,9 @@ Two details that make this a real control rather than a gesture:
   ```
 
 On the macOS machine used while writing this, framed throughput came out the same either way —
-+3.0% / −1.2% (quinn, 512 B / 16 KiB) and +2.1% / +1.2% (s2n-quic), all inside the ±1–10% noise
-of those rows. Worth repeating on the machine you publish from, since that is the platform whose
-numbers people will read.
++3.0% / −1.2% (quinn, 512 B / 16 KiB), +2.1% / +1.2% (s2n-quic) and +1.9% / −1.5% (quiche), all
+inside the ±1–10% noise of those rows. Worth repeating on the machine you publish from, since
+that is the platform whose numbers people will read.
 
 ## What the numbers look like
 
@@ -138,8 +161,10 @@ s2n-quic — 128 MiB per run, median of 10 (3 warmup)
     64 KiB    1156.0 MiB/s    1168.6 MiB/s    1205.6 MiB/s       +1.1%       +4.3%         0.01%   ±0.9%
 ```
 
-Both implementations tell the same story, and the two columns of deltas answer two different
-questions.
+The quiche table is still to come; it has not been run on this machine yet.
+
+Both implementations above tell the same story, and the two columns of deltas answer two
+different questions.
 
 **1. Dropping the framing is what wins on small writes.** At 64 B the gain is 257% (quinn) and
 152% (s2n-quic) — far more than the 4.69% of header bytes can explain. A `DATA` frame is written
@@ -148,11 +173,11 @@ framed chunk costs two writes into the QUIC stream where an unbound chunk costs 
 per-write cost dominates everything else. The gain then falls away as chunks grow and that cost
 is amortised: by 64 KiB, `unbound` is only +0.8% / +1.1% over `framed`.
 
-**2. Handing the stream back keeps winning at every chunk size** — +13.6% (quinn) and +4.3%
-(s2n-quic) at 64 KiB, against ±1.8% / ±0.9% noise. That is not about framing, which is already
-gone in both modes being compared. It is a per-byte cost in h3's send path: h3 passes the payload
-to the transport as a *borrowed slice*, so the transport has to copy it, while the native API
-takes an owned `Bytes` and does not. In quinn-proto the two paths are visible side by side —
+**2. Handing the stream back keeps winning at every chunk size, on h3** — +13.6% (quinn) and
++4.3% (s2n-quic) at 64 KiB, against ±1.8% / ±0.9% noise. That is not about framing, which is
+already gone in both modes being compared. It is a per-byte cost in h3's send path: h3 passes the
+payload to the transport as a *borrowed slice*, so the transport has to copy it, while the native
+API takes an owned `Bytes` and does not. In quinn-proto the two paths are visible side by side —
 `ByteSlice::pop_chunk` does `Bytes::from(self.data[..limit].to_owned())`, a full copy, whereas
 `BytesArray::pop_chunk` (reached via `write_chunk`) does `chunk.split_to(limit)`, a refcount
 split. s2n-quic-h3 copies in the same place, with a `TODO` pointing at
@@ -161,6 +186,12 @@ split. s2n-quic-h3 copies in the same place, with a `TODO` pointing at
 So the handoff's advantage at large chunks is really the cost of an h3 API limitation, which a
 zero-copy send path in h3 would narrow. Until then, taking the stream back is worth a few percent
 of CPU on every byte, on top of whatever the framing costs.
+
+quiche is the control for that claim. tokio-quiche is already zero-copy on both sides of the
+switch — `send_body_zc` and `stream_send_zc` both take the buffer rather than a borrowed slice —
+so there is no copy for its handoff to remove, and its `handoff` column should track `unbound`
+once the framing is gone. If it does, the h3 gap above is an h3 API property rather than anything
+inherent to unbound data. The quiche table will say.
 
 **3. Watch the `noise` column.** The small-chunk rows are the noisy ones (quinn at 64 B and 512 B
 still move ±16-21% even over 10 iterations), which is ironic given they carry the largest effects
@@ -171,9 +202,9 @@ still move ±16-21% even over 10 iterations), which is ironic given they carry t
 
 An earlier run of the same code on an Apple M4 Max (macOS 27.0) capped out near 240 MiB/s in
 *every* mode, and the handoff gain at 64 KiB shrank to +1.9% (quinn) and +0.6% (s2n-quic) — which
-reads as "no difference at large chunks". macOS gives neither library the UDP batching and
-segmentation offload they use on Linux, so the transport path there is expensive enough to hide
-h3's per-byte cost entirely: the bottleneck was never h3.
+reads as "no difference at large chunks". macOS gives none of these libraries the UDP batching
+and segmentation offload they use on Linux, so the transport path there is expensive enough to
+hide the HTTP/3 layer's per-byte cost entirely: the bottleneck was never HTTP/3.
 
 That is worth keeping in mind when reading any result from this harness. It measures the protocol
 work per byte against whatever the local transport path costs; make the transport cheap, as Linux
@@ -186,25 +217,39 @@ result.
 
 ## Dependencies
 
-The h3 and s2n-quic forks carrying unbound data support are pulled straight from git:
+The three forks carrying unbound data support are pulled straight from git:
 
 ```toml
-h3        = { git = "https://github.com/yaroslavros/h3", branch = "unframed-connect" }
-h3-quinn  = { git = "https://github.com/yaroslavros/h3", branch = "unframed-connect" }
-s2n-quic-h3 = { git = "https://github.com/yaroslavros/s2n-quic", branch = "unframed-connect" }
+h3           = { git = "https://github.com/yaroslavros/h3", branch = "unframed-connect" }
+h3-quinn     = { git = "https://github.com/yaroslavros/h3", branch = "unframed-connect" }
+s2n-quic-h3  = { git = "https://github.com/yaroslavros/s2n-quic", branch = "unframed-connect" }
+quiche       = { git = "https://github.com/yaroslavros/quiche", branch = "unframed-connect" }
+tokio-quiche = { git = "https://github.com/yaroslavros/quiche", branch = "unframed-connect" }
 ```
 
 `s2n-quic-h3` still depends on the published `h3`, so `[patch.crates-io]` redirects that to the
-same branch. To work against local checkouts instead, point both the dependencies and the patch
-at paths:
+same branch. To work against local checkouts instead, override the git sources on the command
+line rather than editing the manifest:
 
-```toml
-[patch.crates-io]
-h3 = { path = "../h3/h3" }
+```
+cargo build --release \
+  --config 'patch."https://github.com/yaroslavros/quiche".quiche.path="../quiche/quiche"' \
+  --config 'patch."https://github.com/yaroslavros/quiche".tokio-quiche.path="../quiche/tokio-quiche"'
 ```
 
-`baseline/Cargo.toml` pins the same four crates to their pre-fork upstream commits; see
+`baseline/Cargo.toml` pins the same crates to their pre-fork upstream commits; see
 [Checking the fork against upstream](#checking-the-fork-against-upstream).
 
-`certs/` holds the self-signed test certificate vendored from `s2n-quic-core`, which both
-s2n-tls and rustls accept. It is a demo certificate — never use it for anything else.
+**`libc` needs pinning.** quiche caps it at `<0.2.190`, while tokio picks up whatever is newest,
+so a fresh resolve fails with "all possible versions conflict". Both lockfiles hold `0.2.189`; if
+you regenerate one, re-pin it:
+
+```
+cargo update -p libc --precise 0.2.189
+```
+
+`certs/` holds the self-signed test certificate vendored from `s2n-quic-core`, which s2n-tls,
+rustls and boring all accept. It is a demo certificate — never use it for anything else. boring
+wants filenames rather than PEM bytes, and `baseline/` is a separate crate whose
+`CARGO_MANIFEST_DIR` points elsewhere, so `src/quiche_backend.rs` writes the same compiled-in
+bytes to a fixed path under the temporary directory and hands boring that.

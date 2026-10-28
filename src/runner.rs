@@ -10,6 +10,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 
 use crate::{
+    quiche_backend::Quiche,
     quinn_backend::Quinn,
     s2n_backend::S2nQuic,
     tunnel::{Mode, RunConfig},
@@ -33,7 +34,7 @@ const BUILD: &str = " (upstream baseline)";
 )]
 struct Args {
     /// QUIC implementations to measure
-    #[arg(long, value_delimiter = ',', default_value = "quinn,s2n-quic")]
+    #[arg(long, value_delimiter = ',', default_value = "quinn,s2n-quic,quiche")]
     libs: Vec<String>,
 
     /// Tunnel modes to measure: framed, unbound, handoff
@@ -69,6 +70,7 @@ struct Args {
 enum Harness {
     Quinn(Quinn),
     S2nQuic(S2nQuic),
+    Quiche(Quiche),
 }
 
 impl Harness {
@@ -76,7 +78,10 @@ impl Harness {
         match lib {
             "quinn" => Ok(Self::Quinn(Quinn::new()?)),
             "s2n-quic" | "s2n" => Ok(Self::S2nQuic(S2nQuic::new()?)),
-            other => bail!("unknown implementation `{other}`, expected quinn or s2n-quic"),
+            "quiche" => Ok(Self::Quiche(Quiche::new()?)),
+            other => {
+                bail!("unknown implementation `{other}`, expected quinn, s2n-quic or quiche")
+            }
         }
     }
 
@@ -89,6 +94,7 @@ impl Harness {
         match self {
             Self::Quinn(harness) => harness.run_series(modes, cfg, rounds).await,
             Self::S2nQuic(harness) => harness.run_series(modes, cfg, rounds).await,
+            Self::Quiche(harness) => harness.run_series(modes, cfg, rounds).await,
         }
     }
 }

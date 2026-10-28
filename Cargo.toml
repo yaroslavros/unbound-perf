@@ -13,9 +13,11 @@ unbound = []
 anyhow = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+futures = "0.3"
 h3 = { git = "https://github.com/yaroslavros/h3", branch = "unframed-connect" }
 h3-quinn = { git = "https://github.com/yaroslavros/h3", branch = "unframed-connect" }
 http = "1"
+quiche = { git = "https://github.com/yaroslavros/quiche", branch = "unframed-connect" }
 quinn = { version = "0.11", default-features = false, features = [
     "runtime-tokio",
     "rustls",
@@ -30,6 +32,7 @@ rustls-pemfile = "2"
 s2n-quic = { git = "https://github.com/yaroslavros/s2n-quic", branch = "unframed-connect" }
 s2n-quic-h3 = { git = "https://github.com/yaroslavros/s2n-quic", branch = "unframed-connect" }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio-quiche = { git = "https://github.com/yaroslavros/quiche", branch = "unframed-connect" }
 
 # s2n-quic-h3 depends on the published h3, which has no unbound data support yet.
 [patch.crates-io]

@@ -12,7 +12,7 @@ set -e
 cargo build --release --quiet
 (cd baseline && cargo build --release --quiet)
 
-echo "########## upstream baseline — unmodified h3, h3-quinn, s2n-quic, s2n-quic-h3 ##########"
+echo "########## upstream baseline — unmodified h3, s2n-quic and quiche ##########"
 ./baseline/target/release/unbound-perf-baseline "$@"
 
 echo
