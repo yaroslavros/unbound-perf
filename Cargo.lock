@@ -609,7 +609,7 @@ dependencies = [
 [[package]]
 name = "datagram-socket"
 version = "0.8.1"
-source = "git+https://github.com/yaroslavros/quiche?branch=unframed-connect#737d40091bb21b86702e2d4856deccb650221260"
+source = "git+https://github.com/yaroslavros/quiche?branch=unframed-connect#7c62244cf263b82cdfa24bffe2b422606d923a9d"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1827,7 +1827,7 @@ dependencies = [
 [[package]]
 name = "octets"
 version = "0.3.7"
-source = "git+https://github.com/yaroslavros/quiche?branch=unframed-connect#737d40091bb21b86702e2d4856deccb650221260"
+source = "git+https://github.com/yaroslavros/quiche?branch=unframed-connect#7c62244cf263b82cdfa24bffe2b422606d923a9d"
 
 [[package]]
 name = "once_cell"
@@ -2144,7 +2144,7 @@ dependencies = [
 [[package]]
 name = "qlog"
 version = "0.18.1"
-source = "git+https://github.com/yaroslavros/quiche?branch=unframed-connect#737d40091bb21b86702e2d4856deccb650221260"
+source = "git+https://github.com/yaroslavros/quiche?branch=unframed-connect#7c62244cf263b82cdfa24bffe2b422606d923a9d"
 dependencies = [
  "flate2",
  "foundations",
@@ -2173,7 +2173,7 @@ dependencies = [
 [[package]]
 name = "quiche"
 version = "0.30.0"
-source = "git+https://github.com/yaroslavros/quiche?branch=unframed-connect#737d40091bb21b86702e2d4856deccb650221260"
+source = "git+https://github.com/yaroslavros/quiche?branch=unframed-connect#7c62244cf263b82cdfa24bffe2b422606d923a9d"
 dependencies = [
  "boring",
  "boring-sys",
@@ -3019,7 +3019,7 @@ checksum = "f764005d11ee5f36500a149ace24e00e3da98b0158b3e2d53a7495660d3f4d60"
 [[package]]
 name = "task-killswitch"
 version = "0.2.1"
-source = "git+https://github.com/yaroslavros/quiche?branch=unframed-connect#737d40091bb21b86702e2d4856deccb650221260"
+source = "git+https://github.com/yaroslavros/quiche?branch=unframed-connect#7c62244cf263b82cdfa24bffe2b422606d923a9d"
 dependencies = [
  "dashmap",
  "parking_lot",
@@ -3169,7 +3169,7 @@ dependencies = [
 [[package]]
 name = "tokio-quiche"
 version = "0.20.1"
-source = "git+https://github.com/yaroslavros/quiche?branch=unframed-connect#737d40091bb21b86702e2d4856deccb650221260"
+source = "git+https://github.com/yaroslavros/quiche?branch=unframed-connect#7c62244cf263b82cdfa24bffe2b422606d923a9d"
 dependencies = [
  "anyhow",
  "boring",
