@@ -116,8 +116,10 @@ pub async fn run() -> Result<()> {
     for lib in &args.libs {
         let mut harness = Harness::new(lib)?;
         let mut rates: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+        let mut deltas: BTreeMap<(usize, usize), Paired> = BTreeMap::new();
         // Worst iteration-to-iteration spread seen for any mode at a given chunk size.
-        let mut spread: BTreeMap<usize, f64> = BTreeMap::new();
+        let mut drift: BTreeMap<usize, f64> = BTreeMap::new();
+        let framed = modes.iter().position(|mode| *mode == Mode::Framed);
 
         for &chunk in &args.chunks {
             if chunk == 0 {
@@ -127,13 +129,15 @@ pub async fn run() -> Result<()> {
 
             // All modes run on one connection, round-robin, so warmup and any drift apply to
             // them equally.
-            let series = harness
+            let mut series = harness
                 .run_series(&modes, cfg, args.warmup + args.iters)
                 .await?;
 
-            for (index, (&mode, mut timings)) in modes.iter().zip(series).enumerate() {
+            for timings in &mut series {
                 timings.drain(..args.warmup);
+            }
 
+            for (index, (&mode, timings)) in modes.iter().zip(&series).enumerate() {
                 let fastest = timings.iter().copied().min().expect("at least one run");
                 let slowest = timings.iter().copied().max().expect("at least one run");
 
@@ -163,20 +167,81 @@ pub async fn run() -> Result<()> {
                     );
                 }
 
-                // How much the same measurement moved between iterations. Deltas smaller than
-                // this are noise, not a result.
+                // Kept only as a health signal for the machine. It is *not* the uncertainty of
+                // the delta below, which is measured within rounds and so cancels most of it.
                 let observed = 1.0 - fastest.as_secs_f64() / slowest.as_secs_f64();
-                let row = spread.entry(chunk).or_insert(0.0);
+                let row = drift.entry(chunk).or_insert(0.0);
                 *row = row.max(observed);
 
                 rates.insert((chunk, index), throughput_mib_s(total_bytes, median));
+
+                if let Some(framed) = framed.filter(|framed| *framed != index) {
+                    deltas.insert((chunk, index), Paired::new(&series[framed], timings));
+                }
             }
         }
 
-        report(lib, &args, &modes, &rates, &spread);
+        report(lib, &args, &modes, &rates, &deltas, &drift);
     }
 
     Ok(())
+}
+
+/// How much faster a mode ran than framed, measured round by round.
+///
+/// The modes are interleaved on one connection, so round `k` of every mode ran in the same time
+/// window on the same machine. Differencing *within* a round therefore cancels the drift that
+/// dominates each mode's own spread — which is the whole reason the per-mode spread is a poor
+/// error bar for a comparison between modes, however large it looks.
+struct Paired {
+    /// Median of the per-round deltas.
+    median: f64,
+    /// Half the interquartile range of the per-round deltas.
+    spread: f64,
+    /// How many rounds came out in this mode's favour.
+    agree: usize,
+    rounds: usize,
+}
+
+impl Paired {
+    fn new(framed: &[Duration], mode: &[Duration]) -> Self {
+        let mut deltas: Vec<f64> = framed
+            .iter()
+            .zip(mode)
+            .map(|(framed, mode)| framed.as_secs_f64() / mode.as_secs_f64() - 1.0)
+            .collect();
+
+        let rounds = deltas.len();
+        let agree = deltas.iter().filter(|delta| **delta > 0.0).count();
+
+        deltas.sort_by(f64::total_cmp);
+
+        // Interquartile, not full range: pairing cancels drift that is slow next to a round, but
+        // a round that happens to collide with a burst of unrelated work produces one wild
+        // difference, and a full range would let that single round speak for the whole series.
+        let quartile =
+            |fraction: f64| deltas[((rounds as f64 * fraction) as usize).min(rounds - 1)];
+
+        Self {
+            median: deltas[rounds / 2],
+            spread: (quartile(0.75) - quartile(0.25)) / 2.0,
+            agree,
+            rounds,
+        }
+    }
+}
+
+impl std::fmt::Display for Paired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:+.1}% ±{:.1} {}/{}",
+            self.median * 100.0,
+            self.spread * 100.0,
+            self.agree,
+            self.rounds
+        )
+    }
 }
 
 fn throughput_mib_s(bytes: u64, elapsed: Duration) -> f64 {
@@ -188,7 +253,8 @@ fn report(
     args: &Args,
     modes: &[Mode],
     rates: &BTreeMap<(usize, usize), f64>,
-    spread: &BTreeMap<usize, f64>,
+    deltas: &BTreeMap<(usize, usize), Paired>,
+    drift: &BTreeMap<usize, f64>,
 ) {
     println!();
     println!(
@@ -205,12 +271,12 @@ fn report(
     if baseline.is_some() {
         for mode in modes {
             if *mode != Mode::Framed {
-                print!("{:>12}", format!("{} Δ", mode.label()));
+                print!("{:>21}", format!("{} Δ", mode.label()));
             }
         }
     }
     print!("{:>14}", "DATA headers");
-    println!("{:>8}", "noise");
+    println!("{:>8}", "drift");
 
     for &chunk in &args.chunks {
         print!("{:>10}", format_bytes(chunk));
@@ -222,17 +288,16 @@ fn report(
             }
         }
 
-        if let Some(baseline) = baseline {
-            let framed = rates.get(&(chunk, baseline)).copied();
+        if baseline.is_some() {
             for (index, mode) in modes.iter().enumerate() {
                 if *mode == Mode::Framed {
                     continue;
                 }
-                match (framed, rates.get(&(chunk, index)).copied()) {
-                    (Some(framed), Some(rate)) if framed > 0.0 => {
-                        print!("{:>12}", format!("{:+.1}%", (rate / framed - 1.0) * 100.0))
-                    }
-                    _ => print!("{:>12}", "-"),
+                // Padded as a string: the `Display` impl writes through `write!`, which does
+                // not itself honour a width.
+                match deltas.get(&(chunk, index)) {
+                    Some(paired) => print!("{:>21}", paired.to_string()),
+                    None => print!("{:>21}", "-"),
                 }
             }
         }
@@ -245,16 +310,34 @@ fn report(
         let share = cfg.framing_overhead() as f64 / cfg.total_bytes as f64 * 100.0;
         print!("{:>14}", format!("{share:.2}%"));
 
-        // Spread between iterations of the same measurement: deltas below it mean nothing.
-        match spread.get(&chunk) {
-            Some(noise) => println!("{:>8}", format!("±{:.1}%", noise * 100.0)),
+        // How much the machine itself moved during the run.
+        match drift.get(&chunk) {
+            Some(drift) => println!("{:>8}", format!("±{:.1}%", drift * 100.0)),
             None => println!("{:>8}", "-"),
         }
     }
 
     println!();
+
+    // The upstream baseline build has only the framed mode, so there is nothing to compare and
+    // no delta column to explain.
+    if !deltas.is_empty() {
+        println!(
+            "  Δ: median of the per-round differences against framed, ± half their interquartile"
+        );
+        println!("     range, then how many rounds came out in the mode's favour. The modes are");
+        println!("     interleaved, so each round compares them in the same time window.");
+    }
+
     println!("  DATA headers: what framing costs on the wire, independent of CPU time");
-    println!("  noise: spread between iterations of one measurement; smaller deltas mean nothing");
+    println!("  drift: how much one mode's own throughput moved between rounds. A health signal");
+
+    if deltas.is_empty() {
+        println!("     for the machine; it is not an error bar for a comparison.");
+    } else {
+        println!("     for the machine, not an error bar for Δ — the paired comparison cancels");
+        println!("     most of it, so a drifting machine can still give a tight Δ.");
+    }
 }
 
 fn format_bytes(bytes: usize) -> String {
