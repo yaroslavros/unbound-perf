@@ -119,7 +119,12 @@ pub async fn run() -> Result<()> {
         let mut deltas: BTreeMap<(usize, usize), Paired> = BTreeMap::new();
         // Worst iteration-to-iteration spread seen for any mode at a given chunk size.
         let mut drift: BTreeMap<usize, f64> = BTreeMap::new();
+        // `handoff` paired against `unbound` rather than against framed. Framing is already gone
+        // from both, so this is the pair that isolates what the HTTP/3 layer itself costs — and
+        // it needs to be paired for the same reason every other comparison here does.
+        let mut layer: BTreeMap<usize, Paired> = BTreeMap::new();
         let framed = modes.iter().position(|mode| *mode == Mode::Framed);
+        let against_unbound = handoff_against_unbound(&modes);
 
         for &chunk in &args.chunks {
             if chunk == 0 {
@@ -179,15 +184,36 @@ pub async fn run() -> Result<()> {
                     deltas.insert((chunk, index), Paired::new(&series[framed], timings));
                 }
             }
+
+            if let Some((unbound, handoff)) = against_unbound {
+                layer.insert(chunk, Paired::new(&series[unbound], &series[handoff]));
+            }
         }
 
-        report(lib, &args, &modes, &rates, &deltas, &drift);
+        report(lib, &args, &modes, &rates, &deltas, &drift, &layer);
     }
 
     Ok(())
 }
 
-/// How much faster a mode ran than framed, measured round by round.
+/// The indices of `unbound` and `handoff`, when the run covers both.
+///
+/// Only those two are worth pairing against each other, so this is deliberately not a general
+/// "every mode against every other" matrix.
+#[cfg(feature = "unbound")]
+fn handoff_against_unbound(modes: &[Mode]) -> Option<(usize, usize)> {
+    let find = |target: Mode| modes.iter().position(|mode| *mode == target);
+
+    Some((find(Mode::Unbound)?, find(Mode::Handoff)?))
+}
+
+/// The upstream baseline build has only the framed mode, so there is never a pair here.
+#[cfg(not(feature = "unbound"))]
+fn handoff_against_unbound(_modes: &[Mode]) -> Option<(usize, usize)> {
+    None
+}
+
+/// How much faster a mode ran than a reference mode, measured round by round.
 ///
 /// The modes are interleaved on one connection, so round `k` of every mode ran in the same time
 /// window on the same machine. Differencing *within* a round therefore cancels the drift that
@@ -204,11 +230,11 @@ struct Paired {
 }
 
 impl Paired {
-    fn new(framed: &[Duration], mode: &[Duration]) -> Self {
-        let mut deltas: Vec<f64> = framed
+    fn new(reference: &[Duration], mode: &[Duration]) -> Self {
+        let mut deltas: Vec<f64> = reference
             .iter()
             .zip(mode)
-            .map(|(framed, mode)| framed.as_secs_f64() / mode.as_secs_f64() - 1.0)
+            .map(|(reference, mode)| reference.as_secs_f64() / mode.as_secs_f64() - 1.0)
             .collect();
 
         let rounds = deltas.len();
@@ -255,6 +281,7 @@ fn report(
     rates: &BTreeMap<(usize, usize), f64>,
     deltas: &BTreeMap<(usize, usize), Paired>,
     drift: &BTreeMap<usize, f64>,
+    layer: &BTreeMap<usize, Paired>,
 ) {
     println!();
     println!(
@@ -314,6 +341,24 @@ fn report(
         match drift.get(&chunk) {
             Some(drift) => println!("{:>8}", format!("±{:.1}%", drift * 100.0)),
             None => println!("{:>8}", "-"),
+        }
+    }
+
+    // `handoff` against `unbound`, which the main table cannot show: both of its delta columns
+    // are measured against framed, and dividing one by the other would throw the pairing away
+    // again. Framing is gone from both of these, so what is left is the HTTP/3 layer itself.
+    if !layer.is_empty() {
+        println!();
+        println!("  handoff against unbound — what the HTTP/3 layer costs once framing is gone:");
+        println!();
+
+        for &chunk in &args.chunks {
+            match layer.get(&chunk) {
+                Some(paired) => {
+                    println!("{:>10}{:>21}", format_bytes(chunk), paired.to_string())
+                }
+                None => println!("{:>10}{:>21}", format_bytes(chunk), "-"),
+            }
         }
     }
 

@@ -52,6 +52,10 @@ Reading the table:
   range of those differences, and how many of the rounds came out in the mode's favour. The last
   of those is the one to read first: `10/10` is a consistent difference, `5/10` is a coin flip
   whatever the median says.
+- **`handoff against unbound`**, the block under the table, is the same paired statistic with
+  `unbound` as the reference instead of framed. Framing is gone from both of those, so what is
+  left is what the HTTP/3 layer itself costs. It gets its own block rather than a column because
+  dividing the two `Δ` columns would discard the pairing and put us back where we started.
 - **`DATA headers`** is what framing costs on the wire for that chunk size — purely arithmetic,
   no measurement involved. It is tiny except for very small chunks.
 - **`drift`** is how much a single mode's own throughput moved between rounds. It is a health
@@ -108,7 +112,7 @@ paired columns replace it.
   supports GSO — so `src/quiche_backend.rs` calls `apply_max_capabilities()` on the client
   socket. Without it the quiche sender flushes after each packet, one `sendmsg` per ~1350 bytes,
   and the run measures syscall rate instead of protocol work — it cost a factor of two on Linux
-  (427 → 924 MiB/s at 64 KiB) and compressed every delta along with it. Worth re-checking after
+  (427 → 918 MiB/s at 64 KiB) and compressed every delta along with it. Worth re-checking after
   any dependency bump: a sender stuck without GSO shows up as an implausibly flat ceiling across
   every mode and chunk size.
 - **quiche still sends smaller datagrams than the other two.** `max_send_udp_payload_size`
@@ -175,59 +179,59 @@ Measured on an i9-13900K running Linux, 128 MiB per run, median of 10 after 3 wa
 ```
 quinn — 128 MiB per run, median of 10 (3 warmup)
 
-     chunk          framed         unbound         handoff   unbound Δ   handoff Δ  DATA headers   noise
-      64 B       8.6 MiB/s      30.7 MiB/s      32.8 MiB/s     +257.1%     +281.7%         4.69%  ±21.0%
-     512 B     207.5 MiB/s     501.9 MiB/s     535.1 MiB/s     +141.9%     +157.9%         0.59%  ±16.3%
-     4 KiB     822.8 MiB/s     923.4 MiB/s    1044.3 MiB/s      +12.2%      +26.9%         0.07%   ±1.3%
-    16 KiB     952.6 MiB/s     979.4 MiB/s    1102.2 MiB/s       +2.8%      +15.7%         0.03%   ±1.3%
-    64 KiB     980.2 MiB/s     987.8 MiB/s    1113.8 MiB/s       +0.8%      +13.6%         0.01%   ±1.8%
+     chunk          framed         unbound         handoff            unbound Δ            handoff Δ  DATA headers   drift
+      64 B       9.0 MiB/s      34.4 MiB/s      33.9 MiB/s  +289.2% ±23.7 10/10  +276.5% ±24.3 10/10         4.69%  ±16.2%
+     512 B     220.1 MiB/s     535.3 MiB/s     571.9 MiB/s  +156.1% ±23.0 10/10  +160.4% ±21.7 10/10         0.59%  ±15.2%
+     4 KiB     882.0 MiB/s     990.3 MiB/s    1108.9 MiB/s    +12.2% ±0.5 10/10    +25.6% ±0.5 10/10         0.07%   ±6.7%
+    16 KiB    1015.6 MiB/s    1044.5 MiB/s    1158.4 MiB/s     +2.9% ±0.1 10/10    +14.2% ±0.2 10/10         0.03%   ±2.5%
+    64 KiB    1049.8 MiB/s    1057.5 MiB/s    1176.8 MiB/s     +1.0% ±0.2 10/10    +12.1% ±0.3 10/10         0.01%   ±4.3%
 
 s2n-quic — 128 MiB per run, median of 10 (3 warmup)
 
-     chunk          framed         unbound         handoff   unbound Δ   handoff Δ  DATA headers   noise
-      64 B      93.5 MiB/s     235.6 MiB/s     296.0 MiB/s     +152.1%     +216.7%         4.69%   ±2.5%
-     512 B     494.5 MiB/s     756.6 MiB/s     857.3 MiB/s      +53.0%      +73.3%         0.59%   ±0.7%
-     4 KiB     979.8 MiB/s    1074.1 MiB/s    1130.4 MiB/s       +9.6%      +15.4%         0.07%   ±0.8%
-    16 KiB    1111.1 MiB/s    1147.5 MiB/s    1188.2 MiB/s       +3.3%       +6.9%         0.03%   ±1.1%
-    64 KiB    1156.0 MiB/s    1168.6 MiB/s    1205.6 MiB/s       +1.1%       +4.3%         0.01%   ±0.9%
+     chunk          framed         unbound         handoff            unbound Δ            handoff Δ  DATA headers   drift
+      64 B     100.4 MiB/s     253.3 MiB/s     309.8 MiB/s   +152.5% ±0.4 10/10   +208.8% ±0.4 10/10         4.69%   ±4.1%
+     512 B     536.7 MiB/s     806.6 MiB/s     926.7 MiB/s    +50.3% ±0.6 10/10    +72.7% ±0.8 10/10         0.59%  ±11.9%
+     4 KiB    1039.7 MiB/s    1134.4 MiB/s    1194.4 MiB/s     +9.2% ±0.3 10/10     +14.9% ±1.1 9/10         0.07%  ±20.3%
+    16 KiB    1177.2 MiB/s    1211.1 MiB/s    1254.8 MiB/s     +2.9% ±0.5 10/10     +6.7% ±0.1 10/10         0.03%   ±3.4%
+    64 KiB    1225.8 MiB/s    1236.9 MiB/s    1275.3 MiB/s     +0.8% ±0.1 10/10     +3.9% ±0.2 10/10         0.01%   ±2.7%
 
-quiche — 128 MiB per run, median of 10 (3 warmup), pinned to a performance core
+quiche — 128 MiB per run, median of 10 (3 warmup)
 
-     chunk          framed         unbound         handoff   unbound Δ   handoff Δ  DATA headers   noise
-      64 B      68.0 MiB/s      87.4 MiB/s      93.8 MiB/s      +28.5%      +37.8%         4.69%   ±3.8%
-     512 B     376.2 MiB/s     445.2 MiB/s     467.2 MiB/s      +18.3%      +24.2%         0.59%   ±1.9%
-     4 KiB     847.2 MiB/s     886.4 MiB/s     897.3 MiB/s       +4.6%       +5.9%         0.07%   ±4.6%
-    16 KiB     889.0 MiB/s     905.7 MiB/s     911.9 MiB/s       +1.9%       +2.6%         0.03%  ±20.4%
-    64 KiB     924.4 MiB/s     932.0 MiB/s     935.1 MiB/s       +0.8%       +1.2%         0.01%  ±14.9%
+     chunk          framed         unbound         handoff            unbound Δ            handoff Δ  DATA headers   drift
+      64 B      65.1 MiB/s      82.3 MiB/s      87.9 MiB/s    +27.3% ±1.0 10/10    +36.0% ±1.3 10/10         4.69%   ±6.6%
+     512 B     366.5 MiB/s     441.2 MiB/s     460.8 MiB/s    +17.8% ±1.6 10/10    +23.1% ±1.7 10/10         0.59%   ±6.0%
+     4 KiB     839.4 MiB/s     878.8 MiB/s     887.8 MiB/s     +4.4% ±0.4 10/10     +5.8% ±0.5 10/10         0.07%   ±1.8%
+    16 KiB     886.4 MiB/s     903.3 MiB/s     906.9 MiB/s     +1.8% ±0.2 10/10     +2.3% ±0.3 10/10         0.03%  ±17.1%
+    64 KiB     917.9 MiB/s     924.1 MiB/s     924.8 MiB/s      +0.7% ±0.3 9/10      +0.7% ±0.6 7/10         0.01%   ±7.6%
 ```
-
-> These three tables predate the paired `Δ` reporting described above, so their `Δ` is a ratio of
-> medians and their last column is the old marginal `noise`. Re-running `--iters 10` on the
-> current build adds the per-round spread and the rounds-agreeing count, which is what actually
-> settles the small deltas in the 4 KiB-and-up rows — quiche's ±20.4% at 16 KiB says nothing
-> about whether its +2.6% is real, and the old column invited exactly that misreading.
 
 All three tell the same story, and the two columns of deltas answer two different questions.
 
-**1. Dropping the framing is what wins on small writes.** At 64 B the gain is 257% (quinn), 152%
-(s2n-quic) and 29% (quiche) — in every case far more than the 4.69% of header bytes can explain.
-A `DATA` frame is written as *two* pieces: the frame header and the payload go to the transport
-separately, so a framed chunk costs two writes into the QUIC stream where an unbound chunk costs
-one. (quiche is no different here: `send_body_zc` tries to fold the header into the payload
-buffer with `try_add_prefix`, but `BufSplit for Bytes` does not override it, so the default
-`false` applies and the header gets its own `stream_send`.) At 64 B that per-write cost dominates
-everything else. It then amortises away as chunks grow: by 64 KiB, `unbound` is only +0.8% /
-+1.1% / +0.8% over `framed`.
+Read the agreement counts first. Of the thirty delta cells above, twenty-eight are unanimous and
+one more is 9/10 — these are not marginal effects. The single exception is quiche's `handoff` at
+64 KiB, at 7/10, and that one matters; see finding 2.
+
+**1. Dropping the framing is what wins on small writes.** At 64 B the gain is +289% (quinn),
++153% (s2n-quic) and +27% (quiche), every one of them unanimous across all ten rounds, and in
+every case far more than the 4.69% of header bytes can explain. A `DATA` frame is written as
+*two* pieces: the frame header and the payload go to the transport separately, so a framed chunk
+costs two writes into the QUIC stream where an unbound chunk costs one. (quiche is no different
+here: `send_body_zc` tries to fold the header into the payload buffer with `try_add_prefix`, but
+`BufSplit for Bytes` does not override it, so the default `false` applies and the header gets its
+own `stream_send`.) At 64 B that per-write cost dominates everything else. It then amortises away
+as chunks grow: by 64 KiB, `unbound` is only +1.0% / +0.8% / +0.7% over `framed` — still
+unanimous or near enough in all three, but no longer a reason to choose anything.
 
 How much *percentage* that is worth depends entirely on how expensive the framed path was to
-begin with, which is why the three columns are not comparable. quiche moves 68.0 MiB/s at 64 B
-framed where quinn manages 8.6 — nearly 8× — so quiche simply has far less to recover. The likely
-reason is visible in finding 2: h3's borrowed-slice write makes quinn-proto allocate and copy on
-*every* write, and a framed 64 B chunk costs two of them.
+begin with, which is why the three columns are not comparable. quiche moves 65.1 MiB/s at 64 B
+framed where quinn manages 9.0 — more than 7× — so quiche simply has far less to recover. The
+likely reason is visible in finding 2: h3's borrowed-slice write makes quinn-proto allocate and
+copy on *every* write, and a framed 64 B chunk costs two of them.
 
-**2. Handing the stream back keeps winning at every chunk size, on h3** — +13.6% (quinn) and
-+4.3% (s2n-quic) at 64 KiB, against ±1.8% / ±0.9% noise. That is not about framing, which is
-already gone in both modes being compared. It is a per-byte cost in h3's send path: h3 passes the
+**2. Handing the stream back keeps winning at every chunk size, on h3** — +12.1% (quinn) and
++3.9% (s2n-quic) over framed at 64 KiB, at ±0.3 and ±0.2 with every round agreeing. That is not
+about framing, which is already gone in both modes being compared. It is a per-byte cost in h3's
+send path: h3 passes the
 payload to the transport as a *borrowed slice*, so the transport has to copy it, while the native
 API takes an owned `Bytes` and does not. In quinn-proto the two paths are visible side by side —
 `ByteSlice::pop_chunk` does `Bytes::from(self.data[..limit].to_owned())`, a full copy, whereas
@@ -244,52 +248,62 @@ on both sides of the switch — `send_body_zc` and `stream_send_zc` both take th
 than a borrowed slice — so there is no copy for its handoff to remove. Comparing `handoff`
 against `unbound` directly, which is the pair that isolates it:
 
+At 64 KiB, with `handoff` compared against `unbound` rather than against framed — the pair that
+isolates this, and what the tool's second block reports:
+
 | 64 KiB, handoff over unbound | gain |
 | --- | --- |
-| quinn | +12.8% |
-| s2n-quic | +3.2% |
-| quiche | +0.3% |
+| quinn | +11.3% |
+| s2n-quic | +3.1% |
+| quiche | +0.1% |
 
-quiche's gain rounds to nothing, and stays there from 4 KiB up (+1.2%, +0.7%, +0.3% at
-4/16/64 KiB). These were measured under the old unpaired reporting, so there is no per-round
-spread behind them and the honest claim is the comparative one rather than "quiche's is exactly
-zero": quinn's +12.8% is an order of magnitude larger, so whatever the handoff saves on h3 at
-large chunks, quiche is not paying it. That is what the prediction was — an implementation
-already zero-copy on both sides of the switch has no copy left for the handoff to remove — and it
-also means the h3 figures would shrink if
-[hyperium/h3#78](https://github.com/hyperium/h3/issues/78) were fixed. For estimating what the
-draft itself buys at large chunk sizes, `unbound` is the honest column, not `handoff`.
+quiche's is nothing, and the agreement count is what settles it: quiche's `handoff` at 64 KiB is
+the only cell in the whole matrix that fails to reach 9/10. At **7/10** it is a coin flip, in a
+table where twenty-eight of thirty cells are unanimous. The same mode is unanimous at every
+smaller chunk size, and quinn's and s2n-quic's handoff columns are unanimous at *every* chunk
+size including 64 KiB. So this is not a measurement that was too weak to see an effect; it is the
+one place the effect is absent.
+
+That is exactly what the prediction was — an implementation already zero-copy on both sides of
+the switch has no copy left for the handoff to remove — so the large-chunk handoff gain on h3 is
+a property of h3's send API, not of unbound data. It also means the h3 figures would shrink if
+[hyperium/h3#78](https://github.com/hyperium/h3/issues/78) were fixed. **For estimating what the
+draft itself buys at large chunk sizes, `unbound` is the honest column, not `handoff`.**
 
 **3. Taking the stream back still wins on small writes, for a different reason.** quiche's
-handoff beats its own unbound mode by +4.9% at 512 B and +7.3% at 64 B — the two rows where it is
-clearly ahead, and the only place in the quiche table where the handoff buys anything at all.
-Nothing is being copied there, so this is not finding 2 in miniature. The likely cause
-is the per-*write* bookkeeping of `quiche::h3::Connection` — the stream lookup, the state checks,
-the capacity arithmetic in `do_send_body` — which a released stream skips by going straight to
-`stream_send_zc`. Like the framing itself, it is a per-call cost that disappears into the
-per-byte cost as chunks grow. This is a reading of the code, not something the harness isolates;
-confirming it would need a profile.
+handoff beats its own unbound mode by +6.8% at 64 B, +4.4% at 512 B, +1.0% at 4 KiB, +0.4% at
+16 KiB and +0.1% at 64 KiB — a clean monotonic decay to nothing, which is the signature of a
+per-call cost rather than a per-byte one. Nothing is being copied there, so this is not finding 2
+in miniature. The likely cause is the per-*write* bookkeeping of `quiche::h3::Connection` — the
+stream lookup, the state checks, the capacity arithmetic in `do_send_body` — which a released
+stream skips by going straight to `stream_send_zc`. Like the framing itself, it is a per-call
+cost that disappears into the per-byte cost as chunks grow. This is a reading of the code, not
+something the harness isolates; confirming it would need a profile.
 
-**4. The rows that matter most are the ones a noisy machine ruins.** The large deltas sit at 64 B
-and 512 B, where the machine also wanders most, and they survive it easily — nothing moves a
-+257% result. The rows where a few percent *is* the whole answer, 4 KiB and up, are the fragile
-ones: quiche's ±14.9% and ±20.4% marginal spread at 64 and 16 KiB is many times its own +1.2% and
-+2.6% deltas. Those deltas are not therefore noise — they are the same sign in every table at
-every chunk size, which is not what noise looks like — but the old marginal column could not tell
-you that, which is precisely why the paired `Δ` replaced it. Pinning the run to one performance
-core, as the quiche table above does, helps the absolute numbers; the paired comparison is what
-makes the small deltas readable.
+**4. The pairing is what makes the small deltas readable, and these tables prove it.** Look at
+quiche at 16 KiB: the machine's own throughput wandered by ±17.1% across the run, yet the paired
+deltas are +1.8% ±0.2 and +2.3% ±0.3 with all ten rounds agreeing. An unpaired reading of that
+row would have thrown away a repeatable 2% because something unrelated moved the machine between
+rounds — and an earlier version of this tool did exactly that, printing the ±17.1% as `noise` and
+advising you to disregard anything smaller. s2n-quic at 4 KiB is the same story at ±20.3%.
+
+The pairing is not a cure-all. quinn at 64 B and 512 B still carries ±22-24 on its *paired*
+deltas, because at 9 MiB/s a 128 MiB round takes long enough to straddle whatever else the
+machine is doing. Those rows are fine for "+289%, unanimous" and useless for ordering `unbound`
+against `handoff` — which is why quinn's 64 B handoff reads 1.5% *below* its unbound mode here
+and above it in an earlier run. Neither ordering means anything.
 
 ### The platform matters more than you would think
 
 An earlier run of the same code on an Apple M4 Max (macOS 27.0) capped out near 240-310 MiB/s in
-*every* mode, and the handoff gain at 64 KiB shrank to +1.9% (quinn) and +0.6% (s2n-quic) — which
-reads as "no difference at large chunks". macOS gives none of these libraries the UDP batching
-and segmentation offload they use on Linux, so the transport path there is expensive enough to
-hide the HTTP/3 layer's per-byte cost entirely: the bottleneck was never HTTP/3.
+*every* mode, and the handoff gain at 64 KiB shrank to +1.9% (quinn) and +0.6% (s2n-quic) against
+the +12.1% and +3.9% above — which reads as "no difference at large chunks". macOS gives none of
+these libraries the UDP batching and segmentation offload they use on Linux, so the transport
+path there is expensive enough to hide the HTTP/3 layer's per-byte cost entirely: the bottleneck
+was never HTTP/3.
 
 The GSO bug above is the same lesson from the other direction: one missing sockopt on one socket
-halved quiche's framed throughput on this very machine (427 → 924 MiB/s at 64 KiB), not because
+halved quiche's framed throughput on this very machine (427 → 918 MiB/s at 64 KiB), not because
 anything about HTTP/3 changed, but because the syscall rate had become the limit. Any time this
 harness reports "no difference", the first question is whether the transport was fast enough for
 a difference to be visible at all.
@@ -304,7 +318,7 @@ defaults and the harness only equalises flow-control windows and UDP offloads. E
 columns are the result.
 
 That is worth insisting on, because the ceilings do differ: at 64 KiB framed, quiche reaches
-924 MiB/s against quinn's 980 (−6%) and s2n-quic's 1156 (−20%). Some of that is simply datagram
+918 MiB/s against quinn's 1050 (−13%) and s2n-quic's 1226 (−25%). Some of that is simply datagram
 size — quiche sends 1350-byte datagrams where quinn sends 1452, which is ~7% of the packet rate
 on its own — and the rest is transport and crypto defaults this harness does not try to
 normalise. None of it is about HTTP/3, and none of it moves the delta columns, which is what the
