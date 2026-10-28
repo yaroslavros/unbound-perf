@@ -83,6 +83,17 @@ Reading the table:
   goes negative again, suspect the same thing.
 - **Generous flow-control windows** everywhere (32 MiB per stream), so a run is never
   window-bound.
+- **UDP offloads are on for every sender.** quinn and s2n-quic enable GSO themselves on Linux.
+  tokio-quiche applies socket options for a *listener*, but a client `Socket` is built with
+  every offload off and its own `connect()` deliberately leaves it that way, since not every NIC
+  supports GSO — so `src/quiche_backend.rs` calls `apply_max_capabilities()` on the client
+  socket. Without it the quiche sender flushes after each packet, one `sendmsg` per ~1350 bytes,
+  and the run measures syscall rate instead of protocol work. This is worth re-checking after
+  any dependency bump: a sender stuck without GSO shows up as an implausibly flat ceiling across
+  every mode and chunk size.
+- **quiche still sends smaller datagrams than the other two.** `max_send_udp_payload_size`
+  defaults to 1350 against quinn's 1452, which is a few percent of absolute throughput. It is
+  left alone: it applies equally to all three modes, so it moves the ceiling, not the deltas.
 - The measurement loop for quinn and s2n-quic lives in `src/tunnel.rs` and is generic over
   `h3::quic::Connection`, so those two execute the same code. quiche's HTTP/3 is not generic over
   a transport, so `src/quiche_backend.rs` has its own loop; it is deliberately the same shape —
@@ -211,9 +222,11 @@ work per byte against whatever the local transport path costs; make the transpor
 does, and h3's share of the work becomes visible. The Linux numbers above are the ones to use for
 a server deployment.
 
-Comparing the two tables against each other is not the point — the implementations have different
-defaults and the harness only equalises flow-control windows. Each table's delta columns are the
-result.
+Comparing the tables against each other is not the point — the implementations have different
+defaults and the harness only equalises flow-control windows and UDP offloads. Each table's delta
+columns are the result. In particular, a lower absolute ceiling for one library is far more likely
+to be a socket or datagram-size default than anything about its HTTP/3 layer; the first quiche run
+capped at ~425 MiB/s against ~980 (quinn) purely because its client socket had no GSO.
 
 ## Dependencies
 

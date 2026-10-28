@@ -102,16 +102,23 @@ impl Quiche {
             let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
             socket.connect(*addr).await?;
 
+            // The client is the sender here, so its socket options decide the
+            // ceiling. `tokio_quiche::listen` applies these for the server, but a client
+            // `Socket` is built with every offload off and tokio-quiche's own `connect()`
+            // deliberately leaves it that way ("some NICs don't support GSO"). Without
+            // `UDP_SEGMENT` the send path flushes after every packet — one `sendmsg` per
+            // ~1350 bytes — where quinn and s2n-quic batch by default, so the run would
+            // measure syscall rate rather than protocol work.
+            #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+            let mut socket = Socket::try_from(socket)?;
+            #[cfg(target_os = "linux")]
+            socket.apply_max_capabilities();
+
             let (driver, mut controller) = ClientH3Driver::new(http3_settings());
             let params = ConnectionParams::new_client(quic_settings(), None, Hooks::default());
-            let _conn = connect_with_config(
-                Socket::try_from(socket)?,
-                Some("localhost"),
-                &params,
-                driver,
-            )
-            .await
-            .map_err(|err| anyhow::anyhow!("connecting: {err}"))?;
+            let _conn = connect_with_config(socket, Some("localhost"), &params, driver)
+                .await
+                .map_err(|err| anyhow::anyhow!("connecting: {err}"))?;
 
             transfer(&mut controller, modes, cfg, rounds, report_rx).await
         };
